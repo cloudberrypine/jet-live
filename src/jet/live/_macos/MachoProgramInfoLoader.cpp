@@ -99,7 +99,7 @@ namespace jet
         // Parsing mach-o binary
         auto f = fopen(realFilepath.c_str(), "r");
         if (!f) {
-            context->events->addLog(LogSeverity::kError, "Cannot open " + filepath);
+            context->events->addLog(LogSeverity::kDebug, "Cannot open " + filepath);
             return res;
         }
         fseek(f, 0, SEEK_END);
@@ -333,7 +333,7 @@ namespace jet
         for (const auto& filepath : objFilePaths) {
             auto f = fopen(filepath.c_str(), "r");
             if (!f) {
-                context->events->addLog(LogSeverity::kError, "Cannot open " + filepath);
+                context->events->addLog(LogSeverity::kDebug, "Cannot open " + filepath);
                 continue;
             }
             fseek(f, 0, SEEK_END);
@@ -606,7 +606,7 @@ namespace jet
                                     case ARM64_RELOC_TLVP_LOAD_PAGEOFF12:   // tlv load with an offset within page, scaled by r_length, of GOT entry
                                     case ARM64_RELOC_ADDEND:                // must be followed by ARM64_RELOC_BRANCH26/ARM64_RELOC_PAGE21/ARM64_RELOC_PAGEOFF12
                                     case ARM64_RELOC_AUTHENTICATED_POINTER: // 64-bit pointer with authentication
-                                        context->events->addLog(LogSeverity::kError,
+                                        context->events->addLog(LogSeverity::kDebug,
                                             "Unsupported relocation type: " + relToString(reloc.r_type));
                                         continue;
 #else
@@ -674,7 +674,7 @@ namespace jet
         // Parsing mach-o binary
         auto f = fopen(filepath.c_str(), "r");
         if (!f) {
-            context->events->addLog(LogSeverity::kError, "Cannot open " + filepath);
+            context->events->addLog(LogSeverity::kDebug, "Cannot open " + filepath);
             return res;
         }
         fseek(f, 0, SEEK_END);
@@ -726,7 +726,7 @@ namespace jet
         // Parsing mach-o binary
         auto f = fopen(filepath.c_str(), "r");
         if (!f) {
-            context->events->addLog(LogSeverity::kError, "Cannot open " + filepath);
+            context->events->addLog(LogSeverity::kDebug, "Cannot open " + filepath);
             return res;
         }
         fseek(f, 0, SEEK_END);

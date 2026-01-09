@@ -44,7 +44,7 @@ namespace jet
         if (cu.depFilePath.empty()) {
             // asm files don't have deps and it's okay
             if (!::endsWith(cu.sourceFilePath, ".asm")) {
-                context->events->addLog(LogSeverity::kWarning, "Empty depfile path for cu: " + cu.sourceFilePath);
+                context->events->addLog(LogSeverity::kDebug, "Empty depfile path for cu: " + cu.sourceFilePath);
             }
             return deps;
         }
