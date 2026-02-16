@@ -13,9 +13,18 @@
 #include "jet/live/Utility.hpp"
 #include "jet/live/events/FileChangedEvent.hpp"
 #include "jet/live/events/TryReloadEvent.hpp"
+#include <chrono>
 
 namespace jet
 {
+    namespace
+    {
+        long long elapsedMillis(std::chrono::steady_clock::time_point start, std::chrono::steady_clock::time_point end)
+        {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        }
+    }
+
     Live::~Live()
     {
         if (m_initThread.joinable()) {
@@ -41,9 +50,13 @@ namespace jet
         m_context->events = jet::make_unique<AsyncEventQueue>();
         m_context->codeReloadPipeline = jet::make_unique<CodeReloadPipeline>();
 
-        m_context->codeReloadPipeline->addStep(jet::make_unique<LinkTimeRelocationsStep>());
-        m_context->codeReloadPipeline->addStep(jet::make_unique<FunctionsHookingStep>());
-        m_context->codeReloadPipeline->addStep(jet::make_unique<StaticsCopyStep>());
+        if (config.functionOnlyReload) {
+            m_context->codeReloadPipeline->addStep(jet::make_unique<FunctionsHookingStep>());
+        } else {
+            m_context->codeReloadPipeline->addStep(jet::make_unique<LinkTimeRelocationsStep>());
+            m_context->codeReloadPipeline->addStep(jet::make_unique<FunctionsHookingStep>());
+            m_context->codeReloadPipeline->addStep(jet::make_unique<StaticsCopyStep>());
+        }
 
         m_compiler = jet::make_unique<Compiler>(m_context.get());
 
@@ -148,7 +161,8 @@ namespace jet
     void Live::tryReloadInternal()
     {
         assert(isInitialized());
-        m_compiler->link([this](int status,
+        const auto reloadRequestedAt = std::chrono::steady_clock::now();
+        m_compiler->link([this, reloadRequestedAt](int status,
                              const std::string& libPath,
                              const std::vector<std::string>& sourceFilePaths,
                              const std::string&) {
@@ -160,40 +174,62 @@ namespace jet
             }
 
             m_context->events->addLog(LogSeverity::kDebug, "Loading symbols from " + libPath + "...");
+            const auto symbolsStart = std::chrono::steady_clock::now();
             auto libSymbols = m_context->programInfoLoader->getProgramSymbols(m_context.get(), libPath);
+            const auto symbolsMs = elapsedMillis(symbolsStart, std::chrono::steady_clock::now());
             m_context->events->addLog(LogSeverity::kDebug, "Symbols loaded");
+            m_context->events->addLog(LogSeverity::kInfo, "Load symbols: " + std::to_string(symbolsMs) + " ms");
 
-            m_context->events->addLog(LogSeverity::kDebug, "Loading exported symbols list...");
-            size_t totalExportedSymbols = 0;
-            int totalFiles = 0;
             std::vector<std::string> objFilePaths;
-            for (const auto& sourceFilePath : sourceFilePaths) {
-                auto foundCu = m_context->compilationUnits.find(sourceFilePath);
-                assert(foundCu != m_context->compilationUnits.end());
-                if (foundCu == m_context->compilationUnits.end()) {
-                    continue;
+            if (!m_context->liveConfig.functionOnlyReload) {
+                m_context->events->addLog(LogSeverity::kDebug, "Loading exported symbols list...");
+                const auto exportedSymbolsStart = std::chrono::steady_clock::now();
+                size_t totalExportedSymbols = 0;
+                int totalFiles = 0;
+                for (const auto& sourceFilePath : sourceFilePaths) {
+                    auto foundCu = m_context->compilationUnits.find(sourceFilePath);
+                    assert(foundCu != m_context->compilationUnits.end());
+                    if (foundCu == m_context->compilationUnits.end()) {
+                        continue;
+                    }
+                    objFilePaths.push_back(foundCu->second.objFilePath);
+                    const auto& symNames = m_context->programInfoLoader->getExportedSymbolNames(
+                        m_context.get(), foundCu->second.objFilePath);
+                    totalExportedSymbols += symNames.size();
+                    totalFiles++;
+                    for (const auto& el : symNames) {
+                        m_context->exportedSymbolNamesInSourceFiles[el] = sourceFilePath;
+                    }
                 }
-                objFilePaths.push_back(foundCu->second.objFilePath);
-                const auto& symNames =
-                    m_context->programInfoLoader->getExportedSymbolNames(m_context.get(), foundCu->second.objFilePath);
-                totalExportedSymbols += symNames.size();
-                totalFiles++;
-                for (const auto& el : symNames) {
-                    m_context->exportedSymbolNamesInSourceFiles[el] = sourceFilePath;
-                }
+                m_context->events->addLog(LogSeverity::kDebug,
+                    "Done, total exported symbols: " + std::to_string(totalExportedSymbols) + " in "
+                        + std::to_string(totalFiles) + " files");
+                m_context->events->addLog(
+                    LogSeverity::kInfo,
+                    "Load exported symbols: "
+                        + std::to_string(elapsedMillis(exportedSymbolsStart, std::chrono::steady_clock::now()))
+                        + " ms");
+            } else {
+                m_context->events->addLog(
+                    LogSeverity::kDebug, "Function-only reload: skipping exported-symbol refresh");
             }
-            m_context->events->addLog(LogSeverity::kDebug,
-                "Done, total exported symbols: " + std::to_string(totalExportedSymbols) + " in "
-                    + std::to_string(totalFiles) + " files");
 
             Program libProgram;
             libProgram.path = libPath;
             libProgram.symbols = libSymbols;
             libProgram.objFilePaths = objFilePaths;
 
+            const auto reloadPipelineStart = std::chrono::steady_clock::now();
             m_context->codeReloadPipeline->reload(m_context.get(), &libProgram);
+            const auto reloadPipelineMs = elapsedMillis(reloadPipelineStart, std::chrono::steady_clock::now());
+            m_context->events->addLog(
+                LogSeverity::kInfo, "Apply reload pipeline: " + std::to_string(reloadPipelineMs) + " ms");
 
             m_context->events->addLog(LogSeverity::kInfo, "Code reloaded");
+            m_context->events->addLog(
+                LogSeverity::kInfo,
+                "Reload request total: "
+                    + std::to_string(elapsedMillis(reloadRequestedAt, std::chrono::steady_clock::now())) + " ms");
             m_context->programs.emplace_back(std::move(libProgram));
             m_context->listener->onCodePostLoad();
         });

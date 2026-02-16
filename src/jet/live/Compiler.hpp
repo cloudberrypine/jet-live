@@ -1,6 +1,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <mutex>
 #include <process.hpp>
 #include <set>
@@ -79,6 +80,7 @@ namespace jet
             std::unique_ptr<TinyProcessLib::Process> process;
             int exitCode = -1;
             bool hasColorDiagnosticsFlag = false;
+            std::chrono::steady_clock::time_point startedAt{};
             std::string filename;
             std::string cuOrLibFilepath;
             std::string objFilepath;
@@ -110,6 +112,8 @@ namespace jet
         std::string m_compilerPath;
 
         bool m_shouldLink = false;
+        bool m_hasLinkRequestedAt = false;
+        std::chrono::steady_clock::time_point m_linkRequestedAt{};
         std::function<void(int, const std::string&, const std::vector<std::string>&, const std::string&)>
             m_pendingLinkingFinishCallback;
 

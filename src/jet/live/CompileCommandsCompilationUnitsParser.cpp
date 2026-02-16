@@ -180,6 +180,15 @@ namespace jet
 
     TeenyPath::path CompileCommandsCompilationUnitsParser::getCompileCommandsPath(const LiveContext* context) const
     {
+        if (!context->liveConfig.compileCommandsPath.empty()) {
+            TeenyPath::path configuredPath{context->liveConfig.compileCommandsPath};
+            if (configuredPath.exists()) {
+                return configuredPath.resolve_absolute();
+            }
+            context->events->addLog(LogSeverity::kWarning,
+                "Configured compile_commands.json path does not exist: " + configuredPath.string());
+        }
+
         if (!m_compileCommandsPath.string().empty() && m_compileCommandsPath.exists()) {
             return m_compileCommandsPath;
         }

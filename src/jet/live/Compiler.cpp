@@ -9,6 +9,26 @@
 
 namespace jet
 {
+    namespace
+    {
+        long long elapsedMillis(std::chrono::steady_clock::time_point start, std::chrono::steady_clock::time_point end)
+        {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        }
+
+        std::string injectFlagBeforeOutput(std::string command, const std::string& flag)
+        {
+            const std::string marker = " -o ";
+            const auto outputPos = command.rfind(marker);
+            if (outputPos == std::string::npos) {
+                command += " " + flag;
+                return command;
+            }
+            command.insert(outputPos, " " + flag);
+            return command;
+        }
+    }
+
     Compiler::Compiler(const LiveContext* context)
         : m_context(context)
     {
@@ -31,10 +51,13 @@ namespace jet
         for (auto& el : m_runningCompilationTasks) {
             int status = 0;
             if (el.second.process->try_get_exit_status(status)) {
+                const auto now = std::chrono::steady_clock::now();
+                const auto compileMs = elapsedMillis(el.second.startedAt, now);
                 if (status == 0) {
                     m_readyCompilationUnits[el.second.cuOrLibFilepath] = {
                         el.second.cuOrLibFilepath, el.second.objFilepath};
-                    m_context->events->addLog(LogSeverity::kInfo, "Success: " + el.second.filename);
+                    m_context->events->addLog(
+                        LogSeverity::kInfo, "Success: " + el.second.filename + " (" + std::to_string(compileMs) + " ms)");
                     m_failedCompilationUnits.erase(el.second.filename);
                 } else {
                     std::string message = "Failed: " + el.second.filename;
@@ -93,8 +116,16 @@ namespace jet
                     m_context->events->addLog(LogSeverity::kWarning,
                         "Link failed: " + m_runningLinkTask->cuOrLibFilepath + "\n" + m_runningLinkTask->errMessage);
                 } else {
-                    m_context->events->addLog(LogSeverity::kInfo, "Linked successfully");
+                    const auto now = std::chrono::steady_clock::now();
+                    const auto linkMs = elapsedMillis(m_runningLinkTask->startedAt, now);
+                    std::string linkMessage = "Linked successfully (" + std::to_string(linkMs) + " ms)";
+                    if (m_hasLinkRequestedAt) {
+                        const auto totalMs = elapsedMillis(m_linkRequestedAt, now);
+                        linkMessage += ", compile+link " + std::to_string(totalMs) + " ms";
+                    }
+                    m_context->events->addLog(LogSeverity::kInfo, std::move(linkMessage));
                 }
+                m_hasLinkRequestedAt = false;
 
                 // Also loading library since we should not clear ready CUs
                 // if we get load time errors (like missing symbols)
@@ -130,7 +161,16 @@ namespace jet
         std::function<void(int, const std::string&, const std::string&)>&& finishCallback)
     {
         std::unique_lock<std::mutex> lock(m_mutex);
-        assert(!m_shouldLink && !m_runningLinkTask);
+        if (m_shouldLink) {
+            m_context->events->addLog(
+                LogSeverity::kDebug, "Compilation request arrived while link was queued; postponing link");
+            m_shouldLink = false;
+        }
+        if (m_runningLinkTask) {
+            m_context->events->addLog(
+                LogSeverity::kDebug, "Compilation request ignored while link is running; it will be retried on next change");
+            return;
+        }
 
         if (m_compilerPath.empty()) {
             m_compilerPath = cu.compilerPath;
@@ -162,6 +202,8 @@ namespace jet
             finishCallback)
     {
         m_shouldLink = true;
+        m_hasLinkRequestedAt = true;
+        m_linkRequestedAt = std::chrono::steady_clock::now();
         m_pendingLinkingFinishCallback = std::move(finishCallback);
     }
 
@@ -204,10 +246,14 @@ namespace jet
         task.finishCallback = std::move(finishCallback);
         task.cuOrLibFilepath = cu.sourceFilePath;
         task.objFilepath = cu.objFilePath;
+        task.startedAt = std::chrono::steady_clock::now();
         auto compilationCommandStr = cu.compilationCommandStr;
         compilationCommandStr.append(" -fPIC ");
         if (!cu.depFilePath.empty()) {
             compilationCommandStr.append(" -MD -MF ").append(cu.depFilePath);
+        }
+        if (m_context->liveConfig.functionOnlyReload && m_context->liveConfig.fastCompileForFunctionReload) {
+            compilationCommandStr = injectFlagBeforeOutput(std::move(compilationCommandStr), "-g0");
         }
         auto sourceFilePath = cu.sourceFilePath;
         task.process = jet::make_unique<TinyProcessLib::Process>(
@@ -231,71 +277,85 @@ namespace jet
             return;
         }
 
-        // First, we have to check if there will be unresolved symbols
-        std::unordered_set<std::string> undefinedSymbolNames;
         std::unordered_set<std::string> uniqueObjectFilePaths;
         for (const auto& cu : m_readyCompilationUnits) {
             uniqueObjectFilePaths.insert(cu.second.objFilepath);
-            auto symNames = m_context->programInfoLoader->getUndefinedSymbolNames(m_context, cu.second.objFilepath);
-            undefinedSymbolNames.insert(symNames.begin(), symNames.end());
         }
-        bool pendingCompilation = false;
-        auto oldShouldLink = m_shouldLink;
-        m_shouldLink = false;
-        while (!undefinedSymbolNames.empty()) {
-            auto undefSymName = *undefinedSymbolNames.begin();
-            undefinedSymbolNames.erase(undefSymName);
-
-            // Checking if this symbol can be resolved in load-time
-            bool found = false;
-            for (const auto& program : m_context->programs) {
-                auto foundSym = program.symbols.exportedSymbolNames.find(undefSymName);
-                if (foundSym != program.symbols.exportedSymbolNames.end()) {
-                    found = true;
-                    break;
-                }
+        if (!m_context->liveConfig.functionOnlyReload) {
+            // First, we have to check if there will be unresolved symbols
+            std::unordered_set<std::string> undefinedSymbolNames;
+            for (const auto& cu : m_readyCompilationUnits) {
+                auto symNames = m_context->programInfoLoader->getUndefinedSymbolNames(m_context, cu.second.objFilepath);
+                undefinedSymbolNames.insert(symNames.begin(), symNames.end());
             }
+            bool pendingCompilation = false;
+            auto oldShouldLink = m_shouldLink;
+            m_shouldLink = false;
+            while (!undefinedSymbolNames.empty()) {
+                auto undefSymName = *undefinedSymbolNames.begin();
+                undefinedSymbolNames.erase(undefSymName);
 
-            // If not, trying to find object file which defines this symbol
-            if (!found) {
-                auto foundSourceFilepath = m_context->exportedSymbolNamesInSourceFiles.find(undefSymName);
-                if (foundSourceFilepath != m_context->exportedSymbolNamesInSourceFiles.end()) {
-                    // If so, adding this object file in linkage list.
-                    // Otherwise, lets hope for the best :/
-                    auto foundCu = m_context->compilationUnits.find(foundSourceFilepath->second);
-                    assert(foundCu != m_context->compilationUnits.end());
-                    if (foundCu != m_context->compilationUnits.end()) {
-                        if (uniqueObjectFilePaths.find(foundCu->second.objFilePath) == uniqueObjectFilePaths.end()) {
-                            // if (foundCu-)
-                            uniqueObjectFilePaths.insert(foundCu->second.objFilePath);
-                            auto symNames = m_context->programInfoLoader->getUndefinedSymbolNames(
-                                m_context, foundCu->second.objFilePath);
-                            undefinedSymbolNames.insert(symNames.begin(), symNames.end());
-                            pendingCompilation = true;
-                            compile(foundCu->second, [](int, const std::string&, const std::string&) {});
+                // Checking if this symbol can be resolved in load-time
+                bool found = false;
+                for (const auto& program : m_context->programs) {
+                    auto foundSym = program.symbols.exportedSymbolNames.find(undefSymName);
+                    if (foundSym != program.symbols.exportedSymbolNames.end()) {
+                        found = true;
+                        break;
+                    }
+                }
+
+                // If not, trying to find object file which defines this symbol
+                if (!found) {
+                    auto foundSourceFilepath = m_context->exportedSymbolNamesInSourceFiles.find(undefSymName);
+                    if (foundSourceFilepath != m_context->exportedSymbolNamesInSourceFiles.end()) {
+                        // If so, adding this object file in linkage list.
+                        // Otherwise, lets hope for the best :/
+                        auto foundCu = m_context->compilationUnits.find(foundSourceFilepath->second);
+                        assert(foundCu != m_context->compilationUnits.end());
+                        if (foundCu != m_context->compilationUnits.end()) {
+                            if (uniqueObjectFilePaths.find(foundCu->second.objFilePath)
+                                == uniqueObjectFilePaths.end()) {
+                                uniqueObjectFilePaths.insert(foundCu->second.objFilePath);
+                                auto symNames = m_context->programInfoLoader->getUndefinedSymbolNames(
+                                    m_context, foundCu->second.objFilePath);
+                                undefinedSymbolNames.insert(symNames.begin(), symNames.end());
+                                pendingCompilation = true;
+                                compile(foundCu->second, [](int, const std::string&, const std::string&) {});
+                            }
                         }
                     }
                 }
             }
-        }
 
-        if (pendingCompilation) {
-            m_shouldLink = true;
-            m_pendingLinkingFinishCallback = finishCallback;
-            return;
-        }
+            if (pendingCompilation) {
+                m_shouldLink = true;
+                m_pendingLinkingFinishCallback = finishCallback;
+                return;
+            }
 
-        m_shouldLink = oldShouldLink;
+            m_shouldLink = oldShouldLink;
+        } else {
+            m_context->events->addLog(
+                LogSeverity::kDebug, "Function-only reload: skipping unresolved-symbol dependency expansion");
+        }
 
         // Then linking all collected object files together
         std::vector<std::string> objectFilePaths;
         objectFilePaths.insert(objectFilePaths.end(), uniqueObjectFilePaths.begin(), uniqueObjectFilePaths.end());
 
-        m_context->events->addLog(LogSeverity::kInfo, "Linking...");
+        m_context->events->addLog(
+            LogSeverity::kInfo, "Linking " + std::to_string(objectFilePaths.size()) + " object file(s)...");
         std::string libName = "lib_reload" + std::to_string(m_currentLibIndex++) + ".so";
+        auto preferredBaseAddress = static_cast<uintptr_t>(0);
+        if (!m_context->liveConfig.functionOnlyReload) {
+            preferredBaseAddress = findPrefferedBaseAddressForLibrary(objectFilePaths);
+        } else {
+            m_context->events->addLog(LogSeverity::kDebug, "Function-only reload: skipping preferred base-address scan");
+        }
         auto linkCommand = createLinkCommand(libName,
             m_compilerPath,
-            findPrefferedBaseAddressForLibrary(objectFilePaths),
+            preferredBaseAddress,
             m_context->linkerType,
             objectFilePaths);
         m_context->events->addLog(LogSeverity::kDebug, "Link command:\n" + linkCommand);
@@ -304,6 +364,7 @@ namespace jet
         Task task;
         task.linkFinishCallback = std::move(finishCallback);
         task.cuOrLibFilepath = buildDir + "/" + libName;
+        task.startedAt = std::chrono::steady_clock::now();
         task.process = jet::make_unique<TinyProcessLib::Process>(
             linkCommand, buildDir, nullptr, [this](const char* bytes, size_t n) {
                 m_runningLinkTask->errMessage += std::string(bytes, n);
