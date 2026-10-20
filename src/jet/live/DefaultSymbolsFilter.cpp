@@ -34,9 +34,11 @@ namespace jet
         static const std::string dataSectionName = "__data";
         static const std::string commonSectionName = "__common";
         const auto& sectionName = getStringOr(context.sectionNames, symbol.sectionIndex, g_fallbackSectionName);
+        // __dyld_private is each image's own cookie for dyld, not program state.
         return (
             symbol.type == MachoSymbolType::kSection && !symbol.privateExternal && !symbol.weakDef
-            && (sectionName == bssSectionName || sectionName == dataSectionName || sectionName == commonSectionName));
+            && (sectionName == bssSectionName || sectionName == dataSectionName || sectionName == commonSectionName)
+            && symbol.name != "_dyld_private");
     }
 
     bool DefaultSymbolsFilter::shouldTransferElfSymbol(const ElfContext& context, const ElfSymbol& symbol)

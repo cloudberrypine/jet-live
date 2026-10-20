@@ -3,6 +3,8 @@
 #include <dlfcn.h>
 #include <map>
 #include <set>
+#include <unordered_map>
+#include <vector>
 #include <teenypath.h>
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_images.h>
@@ -34,6 +36,60 @@ namespace
     {
         return imagePathStr.find("/usr/lib") != std::string::npos ||
             imagePathStr.find("/System/Library") != std::string::npos;
+    }
+
+    std::string fileName(const std::string& path)
+    {
+        const auto slash = path.find_last_of('/');
+        return slash == std::string::npos ? path : path.substr(slash + 1);
+    }
+
+    // The debug map names an object linked from a static library
+    // "/path/libX.a(member.o)". Local variables are matched to the reloaded
+    // code's by a hash of their object file's path, which is a compilation
+    // unit's own object path (what the reload links), so the member is
+    // resolved to that path. Objects the CUs don't know keep their name.
+    std::string resolveObjectFilePath(const jet::LiveContext* context,
+        const std::unordered_map<std::string, std::vector<std::string>>& cuObjectsByFileName,
+        const std::string& osoName)
+    {
+        const auto open = osoName.rfind(".a(");
+        if (open == std::string::npos || osoName.back() != ')') {
+            return osoName;
+        }
+        const auto archivePath = osoName.substr(0, open + 2);
+        const auto member = osoName.substr(open + 3, osoName.size() - open - 4);
+        const auto found = cuObjectsByFileName.find(member);
+        if (found == cuObjectsByFileName.end()) {
+            return osoName;
+        }
+        if (found->second.size() == 1) {
+            return found->second.front();
+        }
+        // Members with the same name: CMake keeps a library's objects in
+        // CMakeFiles/<target>.dir/ and names the library lib<target>.a.
+        auto library = fileName(archivePath);
+        if (library.compare(0, 3, "lib") == 0) {
+            library = library.substr(3);
+        }
+        library = library.substr(0, library.size() - 2);
+        const auto targetDir = "/CMakeFiles/" + library + ".dir/";
+        const std::string* match = nullptr;
+        for (const auto& objPath : found->second) {
+            if (objPath.find(targetDir) != std::string::npos) {
+                if (match) {
+                    match = nullptr;
+                    break;
+                }
+                match = &objPath;
+            }
+        }
+        if (match) {
+            return *match;
+        }
+        context->events->addLog(jet::LogSeverity::kWarning,
+            "Cannot tell which object " + osoName + " is: its local variables won't be kept on a reload");
+        return osoName;
     }
 }
 
@@ -166,6 +222,11 @@ namespace jet
             commandOffset += command->cmdsize;
         }
 
+        std::unordered_map<std::string, std::vector<std::string>> cuObjectsByFileName;
+        for (const auto& cu : context->compilationUnits) {
+            cuObjectsByFileName[fileName(cu.second.objFilePath)].push_back(cu.second.objFilePath);
+        }
+
         std::hash<std::string> stringHasher;
         uint64_t currentHash = 0;
         std::string currentFileName;
@@ -268,8 +329,8 @@ namespace jet
 
                         if (machoSymbol.type == MachoSymbolType::kOSO) {
                             machoSymbol.name = stringTable + symbol.n_un.n_strx;
-                            currentHash = stringHasher(machoSymbol.name);
-                            currentFileName = machoSymbol.name;
+                            currentFileName = ::resolveObjectFilePath(context, cuObjectsByFileName, machoSymbol.name);
+                            currentHash = stringHasher(currentFileName);
                         } else if (machoSymbol.type == MachoSymbolType::kSTSYM) {
                             addressHashMap[machoSymbol.virtualAddress] = currentHash;
                             hashNameMap[currentHash] = currentFileName;
