@@ -61,6 +61,11 @@ namespace jet
         std::unique_ptr<Compiler> m_compiler;
         int m_recreateFileWatcherAfterTicks = 0;
         const int m_recreateFileWatcherMaxTicks = 10;
+        // Headers saved while reloadOnHeaderChange is off: their includers
+        // are not reloaded until the program restarts. m_refusedSources are
+        // includers compiled since, dropped before the next link.
+        std::unordered_set<std::string> m_changedHeaders;
+        std::unordered_set<std::string> m_refusedSources;
         std::thread m_initThread;
         std::atomic_bool m_initialized{false};
         std::atomic_bool m_earlyExit{false};
@@ -75,6 +80,8 @@ namespace jet
         std::unordered_set<std::string> getDirectoryFilters();
 
         void onFileChanged(const std::string& filepath);
+        void compileUnlessRefused(CompilationUnit& cu);
+        bool refuseIfIncludesChangedHeader(const CompilationUnit& cu);
         void tryReloadInternal();
     };
 }

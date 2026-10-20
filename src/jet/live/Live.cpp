@@ -161,6 +161,10 @@ namespace jet
     void Live::tryReloadInternal()
     {
         assert(isInitialized());
+        for (const auto& source : m_refusedSources) {
+            m_compiler->remove(source);
+        }
+        m_refusedSources.clear();
         const auto reloadRequestedAt = std::chrono::steady_clock::now();
         m_compiler->link([this, reloadRequestedAt](int status,
                              const std::string& libPath,
@@ -393,16 +397,70 @@ namespace jet
         m_context->events->addLog(LogSeverity::kInfo, "Setup file watcher: done");
     }
 
+    namespace
+    {
+        bool isHeaderPath(const std::string& filepath)
+        {
+            const auto dot = filepath.find_last_of('.');
+            if (dot == std::string::npos || filepath.find('/', dot) != std::string::npos) {
+                return false;
+            }
+            const auto ext = filepath.substr(dot + 1);
+            return ext == "h" || ext == "hh" || ext == "hpp" || ext == "hxx" || ext == "inl" || ext == "inc";
+        }
+    }
+
+    bool Live::refuseIfIncludesChangedHeader(const CompilationUnit& cu)
+    {
+        if (m_changedHeaders.empty()) {
+            return false;
+        }
+        for (const auto& dep : m_context->dependencies[cu.sourceFilePath]) {
+            if (m_changedHeaders.count(dep)) {
+                m_refusedSources.insert(cu.sourceFilePath);
+                m_context->events->addLog(LogSeverity::kWarning,
+                    "Not reloading " + cu.sourceFilePath + ": it includes " + dep
+                        + ", changed since the start. Restart to apply it.");
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void Live::compileUnlessRefused(CompilationUnit& cu)
+    {
+        // Known includers are refused before compiling; in a tree without
+        // depfiles the includes are known once the compile wrote one.
+        if (refuseIfIncludesChangedHeader(cu)) {
+            return;
+        }
+        m_refusedSources.erase(cu.sourceFilePath);
+        m_compiler->compile(cu, [this, &cu](int, const std::string&, const std::string&) {
+            updateDependencies(cu);
+            refuseIfIncludesChangedHeader(cu);
+        });
+    }
+
     void Live::onFileChanged(const std::string& filepath)
     {
+        if (!m_context->liveConfig.reloadOnHeaderChange && isHeaderPath(filepath)
+            && m_context->compilationUnits.find(filepath) == m_context->compilationUnits.end()) {
+            if (m_changedHeaders.insert(filepath).second) {
+                auto foundIncluders = m_context->inverseDependencies.find(filepath);
+                const auto includers =
+                    foundIncluders == m_context->inverseDependencies.end() ? 0 : foundIncluders->second.size();
+                m_context->events->addLog(LogSeverity::kWarning,
+                    "Header changed: " + filepath + ". Not reloading it or the " + std::to_string(includers)
+                        + " known file(s) that include it until a restart.");
+            }
+            return;
+        }
         auto foundDeps = m_context->inverseDependencies.find(filepath);
         if (foundDeps != m_context->inverseDependencies.end()) {
             for (const auto& depPath : foundDeps->second) {
                 auto foundCu = m_context->compilationUnits.find(depPath);
                 if (foundCu != m_context->compilationUnits.end()) {
-                    auto& cu = foundCu->second;
-                    m_compiler->compile(
-                        cu, [this, &cu](int, const std::string&, const std::string&) { updateDependencies(cu); });
+                    compileUnlessRefused(foundCu->second);
                 } else {
                     m_context->events->addLog(LogSeverity::kError, "Cannot find dependency cu for " + depPath);
                 }
@@ -421,9 +479,7 @@ namespace jet
                     for (const auto& cuPath : cuList) {
                         auto foundCu = m_context->compilationUnits.find(cuPath);
                         if (foundCu != m_context->compilationUnits.end()) {
-                            auto& cu = foundCu->second;
-                            m_compiler->compile(cu,
-                                [this, &cu](int, const std::string&, const std::string&) { updateDependencies(cu); });
+                            compileUnlessRefused(foundCu->second);
                         } else {
                             m_context->events->addLog(LogSeverity::kError, "Cannot find cu for " + cuPath);
                         }

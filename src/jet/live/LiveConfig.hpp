@@ -38,5 +38,12 @@ namespace jet
          * reduced debug info for faster turnaround (injects -g0).
          */
         bool fastCompileForFunctionReload = true;
+
+        /**
+         * If false, saving a header reloads nothing: a changed struct layout
+         * or inline function can't be applied to running code. Its includers
+         * are then not reloaded either, even when saved, until a restart.
+         */
+        bool reloadOnHeaderChange = true;
     };
 }
