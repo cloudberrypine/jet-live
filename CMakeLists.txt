@@ -5,6 +5,7 @@ project(jet-live)
 option(JET_LIVE_SHARED "Compile as shared library. ON - shared, OFF - static." OFF)
 option(JET_LIVE_BUILD_EXAMPLE "Compile example application." ON)
 option(JET_LIVE_BUILD_TESTS "Compile test applications." OFF)
+option(JET_LIVE_BUILD_WATCHER_STRESS "Compile the standalone filesystem watcher stress test." OFF)
 
 if (NOT JET_LIVE_CONFIGURED)
   include(cmake/jet_live_setup.cmake)
@@ -389,5 +390,15 @@ endif()
 
 if (JET_LIVE_BUILD_TESTS)
   add_subdirectory(tests)
+endif()
+
+if (JET_LIVE_BUILD_WATCHER_STRESS)
+  add_executable(jet-live-watcher-stress
+    tests/FileWatcherStress.cpp
+    src/jet/live/FileWatcher.cpp)
+  target_compile_features(jet-live-watcher-stress PRIVATE cxx_std_17)
+  target_include_directories(jet-live-watcher-stress PRIVATE
+    src libs/utils libs/teenypath/include libs/xxHash)
+  target_link_libraries(jet-live-watcher-stress PRIVATE lib_efsw Threads::Threads)
 endif()
 
