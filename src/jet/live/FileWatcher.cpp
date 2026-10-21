@@ -69,6 +69,11 @@ namespace jet
                 return;
             }
 
+            // Different directory watches can call us concurrently (one dispatch
+            // queue per FSEvents watch). Protect the debounce map as well as the
+            // event queue, including the expiration scan and duplicate check.
+            std::lock_guard<std::mutex> lock(m_fileEventsMutex);
+
             // Sometimes system fires several file events on single file operation with short time interval.
             // We're trying to collapse several events into 1.
             auto now = steady_clock::now();
@@ -123,7 +128,6 @@ namespace jet
             // }
 
             m_modificationTimePoints[fullFilepath] = now;
-            std::lock_guard<std::mutex> lock(m_fileEventsMutex);
             m_fileEvents.push_back({foundAction->second, dir, filename, std::move(oldFilename)});
         });
 
