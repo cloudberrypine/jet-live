@@ -626,7 +626,31 @@ namespace jet
 
                             auto* relocs = reinterpret_cast<relocation_info*>(machoPtr + section.reloff);
                             for (uint32_t j = 0; j < section.nreloc; j++) {
+                                int64_t addend = 0;
+#ifdef __aarch64__
+                                // ADDEND precedes the relocation it modifies. Its
+                                // r_symbolnum is a signed 24-bit offset, NOT an
+                                // index into orderedSymbols (large fields can
+                                // otherwise read beyond that table).
+                                if (relocs[j].r_type == ARM64_RELOC_ADDEND) {
+                                    const auto& prefix = relocs[j];
+                                    const uint32_t raw = prefix.r_symbolnum;
+                                    addend = (raw & 0x800000) ? int64_t(raw) - 0x1000000 : int64_t(raw);
+                                    if (j + 1 >= section.nreloc
+                                        || relocs[j + 1].r_address != prefix.r_address
+                                        || (relocs[j + 1].r_type != ARM64_RELOC_PAGE21
+                                            && relocs[j + 1].r_type != ARM64_RELOC_PAGEOFF12
+                                            && relocs[j + 1].r_type != ARM64_RELOC_BRANCH26)) {
+                                        context->events->addLog(LogSeverity::kError, "Invalid ARM64_RELOC_ADDEND pair");
+                                        continue;
+                                    }
+                                    ++j;
+                                }
+#endif
                                 const auto& reloc = relocs[j];
+                                if (!reloc.r_extern || reloc.r_symbolnum >= orderedSymbols.size()) {
+                                    continue;
+                                }
                                 const auto& shortSymbol = orderedSymbols[reloc.r_symbolnum];
                                 if (shortSymbol.sectionIndex != bssSectionIndex
                                     && shortSymbol.sectionIndex != dataSectionIndex
@@ -636,6 +660,7 @@ namespace jet
 
                                 Relocation rel;
                                 rel.type = reloc.r_type;
+                                rel.relocationSymbolAddend = addend;
 
                                 switch (reloc.r_length) {
                                     case 2: rel.size = sizeof(uint32_t); break;

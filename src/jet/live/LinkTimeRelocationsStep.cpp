@@ -87,7 +87,7 @@ namespace jet
                 }
             } else if (reloc.type == ARM64_RELOC_PAGE21) {
                 uint32_t instr = *((uint32_t*)relocAddressPtr);
-                uint64_t A = oldVar->runtimeAddress;
+                uint64_t A = oldVar->runtimeAddress + reloc.relocationSymbolAddend;
                 uint64_t P = relocAddress;
                 int64_t pageDiff = (A & ~0xFFF) - (P & ~0xFFF);
                 int32_t new_imm = pageDiff >> 12;
@@ -102,7 +102,7 @@ namespace jet
                 }
             } else if (reloc.type == ARM64_RELOC_PAGEOFF12) {
                 uint32_t instr = *((uint32_t*)relocAddressPtr);
-                uint64_t A = oldVar->runtimeAddress;
+                uint64_t A = oldVar->runtimeAddress + reloc.relocationSymbolAddend;
                 uint32_t offset = A & 0xFFF;
     
                 // Определяем тип инструкции по её опкоду

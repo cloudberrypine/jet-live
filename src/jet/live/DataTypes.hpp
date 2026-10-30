@@ -99,6 +99,7 @@ namespace jet
 
         std::string relocationSymbolName;  /** Relocation symbol name. */
         uint64_t relocationSymbolHash = 0; /** Relocation symbol hash. */
+        int64_t relocationSymbolAddend = 0; /** Signed offset into the symbol (Mach-O ARM64_RELOC_ADDEND). */
 
         uint8_t size = 0; /** Size of relocation entry, in bytes (4, 8). */
 
